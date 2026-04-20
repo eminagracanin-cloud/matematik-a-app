@@ -1755,26 +1755,45 @@ def reset_quiz():
         "quiz_topic",
         "quiz_questions",
         "quiz_index",
-        "quiz_score",
         "quiz_feedback",
         "quiz_answered",
+        "quiz_user_answers",
+        "quiz_results",
+        "quiz_checked",
     ]
     for key in keys:
         if key in st.session_state:
             del st.session_state[key]
 
 
+def deduplicate_questions(questions: list) -> list:
+    seen = set()
+    unique_questions = []
+
+    for q in questions:
+        q_key = normalize_text(q["question"])
+        if q_key not in seen:
+            seen.add(q_key)
+            unique_questions.append(q)
+
+    return unique_questions
+
+
 def start_quiz(level: str, topic: str):
     questions = MATH_DATA[level][topic]["quiz"].copy()
+    questions = deduplicate_questions(questions)
     random.shuffle(questions)
+
     st.session_state.quiz_started = True
     st.session_state.quiz_level = level
     st.session_state.quiz_topic = topic
     st.session_state.quiz_questions = questions
     st.session_state.quiz_index = 0
-    st.session_state.quiz_score = 0
     st.session_state.quiz_feedback = None
     st.session_state.quiz_answered = False
+    st.session_state.quiz_user_answers = {}
+    st.session_state.quiz_results = {}
+    st.session_state.quiz_checked = {}
 
 def render_card(title: str, content: str):
     st.markdown(
@@ -1817,14 +1836,6 @@ def start_mini_exam(level: str, num_tasks: int):
     st.session_state.mini_exam_level = level
     st.session_state.mini_exam_tasks = build_mini_exam(level, num_tasks)
 
-def extend_quiz_bank():
-    for level, topics in EXTRA_QUIZ_QUESTIONS.items():
-        for topic, questions in topics.items():
-            if level in MATH_DATA and topic in MATH_DATA[level]:
-                MATH_DATA[level][topic]["quiz"].extend(questions)
-
-
-extend_quiz_bank()
 
 # =========================================================
 # SIDEBAR
@@ -2044,7 +2055,11 @@ elif page == "Quiz":
 
     col1, col2 = st.columns(2)
     with col1:
-        selected_level = st.selectbox("Vælg niveau til quiz", list(MATH_DATA.keys()), key="quiz_level_select")
+        selected_level = st.selectbox(
+            "Vælg niveau til quiz",
+            list(MATH_DATA.keys()),
+            key="quiz_level_select"
+        )
     with col2:
         selected_topic = st.selectbox(
             "Vælg emne til quiz",
@@ -2057,6 +2072,7 @@ elif page == "Quiz":
     with button_col1:
         if st.button("Start / genstart quiz"):
             start_quiz(selected_level, selected_topic)
+            st.rerun()
 
     with button_col2:
         if st.button("Nulstil quiz"):
@@ -2079,6 +2095,7 @@ elif page == "Quiz":
     else:
         questions = st.session_state.quiz_questions
         idx = st.session_state.quiz_index
+        total = len(questions)
 
         st.markdown(
             f"""
@@ -2086,14 +2103,14 @@ elif page == "Quiz":
                 <div class="small-badge">{st.session_state.quiz_level}</div>
                 <h3>{st.session_state.quiz_topic}</h3>
                 <div class="muted">
-                    Spørgsmål {min(idx + 1, len(questions))} ud af {len(questions)}
+                    Spørgsmål {idx + 1} ud af {total}
                 </div>
             </div>
             """,
             unsafe_allow_html=True,
         )
 
-        if idx < len(questions):
+        if idx < total:
             q = questions[idx]
 
             st.markdown(
@@ -2106,9 +2123,21 @@ elif page == "Quiz":
             )
 
             answer_key = f"user_answer_{idx}"
-            user_answer = st.text_input("Skriv dit svar her", key=answer_key)
 
-            if not st.session_state.quiz_answered:
+            if answer_key not in st.session_state.quiz_user_answers:
+                st.session_state.quiz_user_answers[answer_key] = ""
+
+            user_answer = st.text_input(
+                "Skriv dit svar her",
+                value=st.session_state.quiz_user_answers.get(answer_key, ""),
+                key=f"text_input_{idx}",
+            )
+
+            st.session_state.quiz_user_answers[answer_key] = user_answer
+
+            already_checked = st.session_state.quiz_checked.get(idx, False)
+
+            if not already_checked:
                 if st.button("Tjek svar"):
                     is_correct = check_answer(
                         user_answer=user_answer,
@@ -2116,8 +2145,10 @@ elif page == "Quiz":
                         alternatives=q["alternatives"],
                     )
 
+                    st.session_state.quiz_results[idx] = is_correct
+                    st.session_state.quiz_checked[idx] = True
+
                     if is_correct:
-                        st.session_state.quiz_score += 1
                         st.session_state.quiz_feedback = {
                             "type": "success",
                             "message": f"✅ Korrekt!\n\nForklaring: {q['explanation']}",
@@ -2132,26 +2163,41 @@ elif page == "Quiz":
                             ),
                         }
 
-                    st.session_state.quiz_answered = True
                     st.rerun()
-
-            if st.session_state.quiz_feedback:
-                feedback = st.session_state.quiz_feedback
-                if feedback["type"] == "success":
-                    st.success(feedback["message"])
+            else:
+                was_correct = st.session_state.quiz_results.get(idx, False)
+                if was_correct:
+                    st.success(f"✅ Korrekt!\n\nForklaring: {q['explanation']}")
                 else:
-                    st.error(feedback["message"])
+                    st.error(
+                        f"❌ Ikke helt rigtigt.\n\n"
+                        f"Rigtigt svar: {q['answer']}\n\n"
+                        f"Forklaring: {q['explanation']}"
+                    )
 
-            if st.session_state.quiz_answered:
-                if st.button("Næste spørgsmål"):
-                    st.session_state.quiz_index += 1
-                    st.session_state.quiz_feedback = None
-                    st.session_state.quiz_answered = False
-                    st.rerun()
+            nav_col1, nav_col2 = st.columns(2)
+
+            with nav_col1:
+                if idx > 0:
+                    if st.button("Tilbage"):
+                        st.session_state.quiz_index -= 1
+                        st.session_state.quiz_feedback = None
+                        st.rerun()
+
+            with nav_col2:
+                if idx < total - 1:
+                    if st.button("Næste spørgsmål"):
+                        st.session_state.quiz_index += 1
+                        st.session_state.quiz_feedback = None
+                        st.rerun()
+                else:
+                    if len(st.session_state.quiz_checked) == total:
+                        if st.button("Se resultat"):
+                            st.session_state.quiz_index = total
+                            st.rerun()
 
         else:
-            score = st.session_state.quiz_score
-            total = len(questions)
+            score = sum(1 for value in st.session_state.quiz_results.values() if value)
             percentage = round((score / total) * 100) if total > 0 else 0
 
             st.markdown(
